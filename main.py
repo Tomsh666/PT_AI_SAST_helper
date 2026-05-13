@@ -18,7 +18,7 @@ import typer
 from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
 
 import db
-from sarif import iter_findings, parse_rules
+from sarif import iter_findings, parse_rules, clean_findings, BLACKLIST
 
 app = typer.Typer(
     help="LLM-триаж SARIF-отчётов от PT AI",
@@ -50,7 +50,7 @@ def init(
     conn.close()
     typer.secho(f"БД создана: {db_path}", fg=typer.colors.GREEN)
 
-
+#todo: разобраться с rule_map
 @app.command()
 def parse(
     sarif: Path = typer.Option(..., "--sarif", help="Путь к SARIF-файлу."),
@@ -110,19 +110,61 @@ def parse(
 
 @app.command()
 def rules(
-    db: Path = typer.Option(Path("output/triage.db"), "--db"),
-    top: int = typer.Option(20, "--top", help="Сколько правил показать."),
+    db_path: Path = typer.Option(Path("output/triage.db"), "--db"),
+    top: int = typer.Option(50, "--top", help="Сколько правил показать."),
 ) -> None:
-    """Топ-N правил по количеству срабатываний (помогает решить, что в мусор)."""
-    _todo("Шаг 2", "rules")
+    """Все правила с количеством findings (kept и отфильтрованные)."""
+    from rich.table import Table
+    from rich.console import Console
+
+    conn = db.connect(db_path)
+    console = Console()
+
+    table = Table(title="Правила", show_lines=False)
+    table.add_column("Кол-во", justify="right", style="cyan")
+    table.add_column("%", justify="right")
+    table.add_column("kept", justify="center")
+    table.add_column("Правило")
+
+    total = conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0]
+    for row in conn.execute("""
+        SELECT rule_id,
+               COUNT(*) as cnt,
+               SUM(kept) as kept_cnt
+        FROM findings
+        GROUP BY rule_id
+        ORDER BY cnt DESC
+        LIMIT ?
+    """, (top,)):
+        kept_all = row["kept_cnt"] == row["cnt"]
+        pct = f"{row['cnt'] / total * 100:.1f}%"
+        kept_label = "✓" if kept_all else "✗"
+        style = "dim" if not kept_all else ""
+        table.add_row(
+            str(row["cnt"]), pct, kept_label, row["rule_id"],
+            style=style,
+        )
+
+    console.print(table)
+    conn.close()
 
 
 @app.command()
 def clean(
-    db: Path = typer.Option(Path("output/triage.db"), "--db"),
+    db_path: Path = typer.Option(Path("output/triage.db"), "--db"),
 ) -> None:
-    """Пометить мусорные findings как kept=0 (несогласованная интеграция и т.п.)."""
-    _todo("Шаг 2", "clean")
+    """Пометить мусорные findings как kept=0."""
+    conn = db.connect(db_path)
+    result = clean_findings(conn)
+
+    total_marked = sum(result.values())
+    typer.secho(f"Помечено kept=0: {total_marked:,} findings", fg=typer.colors.YELLOW, bold=True)
+    for rule_id, cnt in sorted(result.items(), key=lambda x: -x[1]):
+        typer.echo(f"  {cnt:>6}  {rule_id}")
+
+    kept = conn.execute("SELECT COUNT(*) FROM findings WHERE kept=1").fetchone()[0]
+    typer.secho(f"\nОсталось для обработки (kept=1): {kept:,}", fg=typer.colors.GREEN)
+    conn.close()
 
 
 @app.command()

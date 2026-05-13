@@ -6,8 +6,8 @@
 
 ```
 SARIF файл
-   ↓  parse        — потоково читаем findings из JSON
-   ↓  clean        — выкидываем мусорные правила (несогласованная интеграция и т.п.)
+   ↓  parse        — потоково читаем findings + правила из JSON
+   ↓  clean        — помечаем мусорные правила как kept=0
    ↓  group        — нормализуем snippet, считаем group_id, дедуплицируем
    ↓  enrich       — берём ±15 строк из исходника
    ↓  triage       — один LLM-вызов на группу → JSON {verdict, confidence}
@@ -42,8 +42,8 @@ python main.py --help
 python main.py init
 python main.py parse  --sarif inputs/SARIF_reports/<file>.sarif \
                       --project-root inputs/projects/<name>
-python main.py rules                  # смотрим топ-правила
-python main.py clean                  # отсев мусора
+python main.py rules                  # смотрим все правила с kept-статусом
+python main.py clean                  # помечаем мусор (kept=0)
 python main.py group
 python main.py enrich
 python main.py triage --limit 20      # smoke-прогон 20 групп
@@ -53,41 +53,130 @@ python main.py report --format md --out output/reports/summary.md
 python main.py dive <finding_id>      # точечный разбор
 ```
 
+## Структура проекта
+
+```
+PT_AI_SAST_helper/
+├── sarif/
+│   ├── __init__.py   — экспортирует iter_findings, parse_rules, clean_findings
+│   ├── parse.py      — потоковое чтение SARIF (ijson), маппинг путей, finding_id
+│   ├── clean.py      — загружает blacklist.txt, функция apply()
+│   └── blacklist.txt — список правил для фильтрации (одно на строку, # — комментарий)
+├── db.py             — SQLite: connect, init_schema, insert_rules, insert_findings_batch
+├── main.py           — CLI (Typer): все команды
+├── inputs/           — SARIF-файлы и исходники (в .gitignore)
+├── output/           — triage.db, отчёты (в .gitignore)
+├── requirements.txt
+└── README.md
+```
+
 ## Структура данных
 
-- `inputs/SARIF_reports/*.sarif` — отчёты PT AI (в `.gitignore`, наружу не уходят).
-- `inputs/projects/<name>/` — исходники соответствующего проекта.
+- `inputs/SARIF_reports/*.sarif` — отчёты PT AI (в `.gitignore`).
+- `inputs/projects/<name>/` — исходники проекта.
 - `output/triage.db` — SQLite со всем состоянием пайплайна (в `.gitignore`).
 - `output/reports/*.md` — Markdown-выводы deep-dive и сводный отчёт.
 
+### Таблицы БД
+
+| Таблица | Назначение |
+|---|---|
+| `rules` | Маппинг rule_id → человекочитаемое имя (из SARIF) |
+| `findings` | Все срабатывания; `kept=0` — исключены из обработки |
+| `groups` | Группы по (rule_id, normalized_snippet) — Шаг 3 |
+| `contexts` | ±15 строк контекста из исходников — Шаг 4 |
+| `verdicts` | LLM-вердикты по группам — Шаг 5 |
+| `dives` | Развёрнутые разборы по finding'ам — Шаг 7 |
+
+> Таблицы `groups`, `contexts`, `verdicts`, `dives` — добавляются по мере реализации шагов.
+
 ### Path mapping
 
-В SARIF путь имеет вид `./<archive-root>/path/to/file.ext`. Маппер отрезает `./<первый_сегмент>/` и склеивает остаток с `--project-root`. Имена «архивного корня» и папки проекта могут не совпадать (`BenchmarkJava-master` vs `BenchmarkJava`) — есть флаг `--prefix-strip` для override.
+В SARIF путь вида `./<archive-root>/path/to/file.ext`. Маппер отрезает `./<первый_сегмент>/` и склеивает с `--project-root`. Флаг `--prefix-strip` для override (если имя архива ≠ имени папки проекта).
 
 ### Стабильный finding_id
 
-`finding_id = sha1(f"{rule_id}|{file_uri}|{line}|{snippet}")[:8]` — между прогонами один и тот же finding получает один и тот же ID (по ТЗ).
+`finding_id = sha1(f"{rule_id}|{file_uri}|{line}|{snippet}")[:8]` — один и тот же finding между прогонами получает один и тот же ID. Точные дубликаты (rule+file+line+snippet совпадают) → одинаковый ID → `INSERT OR IGNORE` вставляет только один.
 
-### Группировка
+### Группировка (Шаг 3)
 
-`group_id = sha1(f"{rule_id}|{normalize_snippet(snippet)}")[:10]`. LLM зовётся один раз на группу, вердикт распространяется на все её findings виртуально через JOIN (`findings JOIN groups JOIN verdicts ON group_id`).
+`group_id = sha1(f"{rule_id}|{normalize_snippet(snippet)}")[:10]`. LLM зовётся один раз на группу. Вердикт группы распространяется на все findings виртуально через JOIN.
 
 `normalize_snippet`: trim + collapse whitespace + удалить string/числовые литералы + удалить однострочные комментарии.
+
+## Правила фильтрации (sarif/clean.py — BLACKLIST)
+
+После `parse` + `clean` на тестовом SARIF (BenchmarkJava, PT AI 5.4):
+- **Всего finding'ов**: 99 046 (сырые) → 70 233 (уникальные) → **7 558 (kept=1, идут в LLM)**
+- Список правил: `sarif/blacklist.txt` — редактировать вручную, потом `python main.py clean`
+
+### Отфильтровано (kept=0)
+
+| Правило | Кол-во | Причина |
+|---|---|---|
+| Несогласованная интеграция с внешними ресурсами | 60 724 | По ТЗ — архитектурное замечание |
+| Раскрытие информации в статических файлах или константах | 818 | Информационная находка |
+| Использование скомпрометированного ... криптографического алгоритма | 324 | Code quality, не уязвимость |
+| Статический генератор случайных чисел | 218 | Code quality |
+| Пустой блок обработки исключений | 148 | Code quality |
+| Уязвимые функции хэширования | 141 | Code quality |
+| Нарушение границ доверия | 88 | Архитектурное замечание |
+| Использование браузерного api (в режиме SSR) | 36 | SSR-специфика, не уязвимость |
+| TEST CWE-1321 - Potentially dangerous methods | 2 | Тестовое правило |
+| Свойство shutdown/clientAuth/autoDeploy/deployOnStartup | 8 | Конфигурация Tomcat |
+| Свойство error-code/http-only/secure/... (web.xml) | 6 | Конфигурация web.xml |
+| Хранение минифицированного JS | 2 | Не уязвимость |
+| Использование одиночной инструкции apt-get update | 1 | Docker best practice |
+| Отсутствие директивы HEALTHCHECK | 1 | Docker best practice |
+| Не удаленный код отладки | 3 | Code quality, не уязвимость |
+| TEST CWE-1321 (Prototype Pollution) - Direct changes | 155 | JS-правило в Java-проекте |
+
+### Остаётся для LLM (kept=1)
+
+| Правило | Кол-во |
+|---|---|
+| Межсайтовое выполнение сценариев | 1 757 |
+| Некорректные ограничения путей для каталогов (Path Traversal) | 1 209 |
+| Инъекция в Cookie-параметре | 1 149 |
+| Расщепление HTTP-ответа | 1 149 |
+| Разглашение важной системной информации | 1 119 |
+| Изменение произвольных файлов | 579 |
+| Внедрение SQL-кода | 213 |
+| Внедрение команд ОС | 110 |
+| Чтение произвольного файла | 92 |
+| Отсутствие в HTTPS-сессиях атрибута Secure | 36 |
+| Отсутствует шифрование важных данных | 36 |
+| Внедрение операторов LDAP | 24 |
+| JQuery добавление HTML кода в DOM | 19 |
+| Подделка записи файла журнала | 18 |
+| Внедрение операторов XPath | 13 |
+| Установка кода из недоверенных источников | 11 |
+| Некорректная нейтрализация директив / Внедрение eval | 9 |
+| JQuery небезопасная функция для DOM | 4 |
+| Использование жестко закодированного пароля | 4 |
+| JQuery заключение элемента в код HTML | 3 |
+| DOM модификация HTML тега | 1 |
+| ORM инъекция | 1 |
+| Неконтролируемое использование ресурсов | 1 |
+| Создание произвольного файла | 1 |
+
 
 ## Правила кода
 
 - **Всё локально**, никаких внешних API. Единственный сетевой вызов — `http://localhost:11434` (Ollama).
 - Пути — `pathlib.Path`, не строки.
 - SARIF — **потоково** через `ijson` (файл может быть >70 МБ).
-- I/O LLM — через **pydantic-модели**, JSON валидируется, при невалидном — retry с уточнением промпта.
+- I/O LLM — через **pydantic-модели**, JSON валидируется, при невалидном — retry.
 - Маленькие, обсуждаемые шаги — каждое изменение в коде согласовывается перед записью.
+- Windows: консоль переключается на UTF-8 в начале `main.py` (`sys.stdout.reconfigure`).
 
 ## Сброс
 
 ```bash
-# Снести БД и начать сначала
 rm output/triage.db
 python main.py init
+python main.py parse --sarif ... --project-root ...
+python main.py clean
 ```
 
 ## Ограничения MVP
@@ -95,24 +184,20 @@ python main.py init
 - Один проект на одну БД (нет multi-tenancy).
 - `concurrency=1` для LLM-вызовов (RTX 2060 6GB — параллелить нечем).
 - Нет UI, только CLI.
-- Deep-dive только по явному `dive <finding_id>` — не для всех findings разом.
-- Список мусорных правил для `clean` собирается **руками** на Шаге 2, глядя на реальные правила в боевом SARIF.
+- Deep-dive только по явному `dive <finding_id>`.
 
 ## Открытые вопросы
 
-- **Язык deep-dive**: по умолчанию `en` (CWE/OWASP — англоязычные источники, LLM точнее на английском). Есть флаг `--lang ru|en`, сравним на Шаге 7.
-- **Список мусорных правил**: наполним вручную на Шаге 2 (`pt-sast rules` → блэклист).
-- **Few-shot примеры в промпте**: не в MVP, добавим если zero-shot даёт плохую точность.
+- **TODO в main.py (`#todo: разобраться с rule_map`)**: при LLM-триаже нужно решить, передавать ли rule_map в промпт или достаточно имени правила из findings. Разбираем на Шаге 5.
+- **Язык deep-dive**: по умолчанию `en`. Флаг `--lang ru|en`, сравниваем на Шаге 7.
+- **Few-shot примеры в промпте**: не в MVP.
 - **Параллелизм / Web UI / human-in-the-loop**: после MVP.
 
-## План
+## Статус шагов
 
-Подробный пошаговый план реализации: `C:\Users\anton\.claude\plans\concurrent-brewing-castle.md`. Каждый шаг = один логический модуль = один коммит = обсуждение перед кодом.
-
-Текущий статус шагов:
 - [x] Шаг 0. Каркас + CLAUDE.md + .gitignore
-- [ ] Шаг 1. `parse` + БД
-- [ ] Шаг 2. `clean` + `rules`
+- [x] Шаг 1. `parse` + `init` + БД (таблицы `rules`, `findings`)
+- [x] Шаг 2. `clean` + `rules`
 - [ ] Шаг 3. `group`
 - [ ] Шаг 4. `enrich` + `show`
 - [ ] Шаг 5. `triage` (Ollama + промпт)
