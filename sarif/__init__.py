@@ -6,6 +6,6 @@
   group.py  — нормализация snippet и группировка (Шаг 3)
 """
 
-from sarif.parse import iter_findings
+from sarif.parse import iter_findings, parse_rules
 
-__all__ = ["iter_findings"]
+__all__ = ["iter_findings", "parse_rules"]

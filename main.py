@@ -18,7 +18,7 @@ import typer
 from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
 
 import db
-from sarif import iter_findings
+from sarif import iter_findings, parse_rules
 
 app = typer.Typer(
     help="LLM-триаж SARIF-отчётов от PT AI",
@@ -68,6 +68,13 @@ def parse(
     conn = db.connect(db_path)
     db.init_schema(conn)  # на случай если init не запускали
 
+    # --- Шаг 1: правила ---
+    typer.echo("Читаем правила из SARIF...")
+    rule_map = parse_rules(sarif)
+    db.insert_rules(conn, rule_map)
+    typer.echo(f"  Правил найдено: {len(rule_map)}")
+
+    # --- Шаг 2: findings ---
     total_read = 0
     total_inserted = 0
     batch: list[dict] = []
@@ -80,7 +87,7 @@ def parse(
     ) as progress:
         task = progress.add_task("Парсинг SARIF...", total=None)
 
-        for finding in iter_findings(sarif, project_root, prefix_strip):
+        for finding in iter_findings(sarif, project_root, prefix_strip, rule_map):
             batch.append(finding)
             total_read += 1
             progress.update(task, advance=1, description=f"Прочитано: {total_read:,}")

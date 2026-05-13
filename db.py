@@ -1,6 +1,8 @@
 """Работа с SQLite-базой данных.
 
-Пока одна таблица — findings. Остальные добавим по мере реализации шагов.
+Таблицы:
+  rules    — маппинг rule_id (UUID или строка) → человекочитаемое имя
+  findings — все срабатывания из SARIF (rule_id уже хранится как name)
 """
 
 from __future__ import annotations
@@ -10,6 +12,12 @@ from pathlib import Path
 
 
 _SCHEMA = """
+-- Маппинг rule_id (UUID или строка) → человекочитаемое имя из SARIF
+CREATE TABLE IF NOT EXISTS rules (
+    rule_id  TEXT PRIMARY KEY,
+    name     TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS findings (
     finding_id  TEXT PRIMARY KEY,
     rule_id     TEXT NOT NULL,
@@ -32,6 +40,10 @@ _INSERT_FINDING = """
         (:finding_id, :rule_id, :file_uri, :file_path, :line, :snippet)
 """
 
+_INSERT_RULE = """
+    INSERT OR IGNORE INTO rules (rule_id, name) VALUES (:rule_id, :name)
+"""
+
 _BATCH_SIZE = 1000
 
 
@@ -47,6 +59,13 @@ def connect(db_path: Path) -> sqlite3.Connection:
 def init_schema(conn: sqlite3.Connection) -> None:
     """Создать таблицы и индексы (если ещё нет)."""
     conn.executescript(_SCHEMA)
+    conn.commit()
+
+
+def insert_rules(conn: sqlite3.Connection, rules: dict[str, str]) -> None:
+    """Вставить маппинг rule_id → name. INSERT OR IGNORE — повторы пропускаются."""
+    rows = [{"rule_id": k, "name": v} for k, v in rules.items()]
+    conn.executemany(_INSERT_RULE, rows)
     conn.commit()
 
 
