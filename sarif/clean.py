@@ -13,7 +13,10 @@ from pathlib import Path
 
 _BLACKLIST_FILE = Path(__file__).parent / "blacklist.txt"
 
-#todo: обновить Blacklist. Сверить со всеми уязвимостями
+# TODO(Шаг 5 — точность): пересмотреть blacklist.txt против полного списка
+# из 48 правил боевого SARIF. Убедиться, что (а) в kept=1 не утекает мусор,
+# (б) ничего реально уязвимого не отфильтровано. Сейчас список собран вручную
+# по топу частот — см. таблицу правил в CLAUDE.md.
 def load_blacklist(path: Path = _BLACKLIST_FILE) -> frozenset[str]:
     """Загрузить список правил из .txt файла."""
     rules: list[str] = []

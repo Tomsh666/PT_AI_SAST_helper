@@ -63,7 +63,12 @@ PT_AI_SAST_helper/
 │   ├── clean.py      — загружает blacklist.txt, функция apply()
 │   ├── blacklist.txt — список правил для фильтрации (одно на строку, # — комментарий)
 │   └── group.py      — нормализация snippet, group_id, группировка kept-findings
-├── db.py             — SQLite: connect, init_schema, insert_rules, insert_findings_batch
+├── enrich/           — обогащение контекстом (Шаг 4), энричер заменяем
+│   ├── __init__.py   — get_enricher() — точка подмены реализации
+│   ├── base.py       — контракт Enricher + датаклассы Finding / Context
+│   ├── radius.py     — RadiusEnricher: ±N строк вокруг срабатывания (дефолт)
+│   └── runner.py     — apply(): прогон энричера по kept-findings → таблица contexts
+├── db.py             — SQLite: connect, init_schema, insert_rules, insert_findings_batch, insert_contexts_batch
 ├── main.py           — CLI (Typer): все команды
 ├── inputs/           — SARIF-файлы и исходники (в .gitignore)
 ├── output/           — triage.db, отчёты (в .gitignore)
@@ -89,7 +94,7 @@ PT_AI_SAST_helper/
 | `verdicts` | LLM-вердикты по группам — Шаг 5 |
 | `dives` | Развёрнутые разборы по finding'ам — Шаг 7 |
 
-> Таблицы `contexts`, `verdicts`, `dives` — добавляются по мере реализации шагов.
+> Таблицы `verdicts`, `dives` — добавляются по мере реализации шагов.
 > `findings.group_id` дотягивается в существующую БД через `db._migrate()` (ALTER, без перепарсинга SARIF).
 
 ### Path mapping
@@ -107,6 +112,12 @@ PT_AI_SAST_helper/
 `normalize_snippet`: trim + схлопывание пробелов (`\s+` → один пробел). Литералы и комментарии **не трогаем** — в боевом SARIF snippet'ы и так почти точные дубли (88%), агрессивная нормализация дала бы риск слить разные паттерны при мизерном выигрыше. В SARIF от PT AI нет `codeFlows`/`relatedLocations` — кроме snippet'а группировать не по чему.
 
 `group.apply()` идемпотентна: сбрасывает `group_id`/`groups` и строит заново — можно перезапускать после правки blacklist без перепарсинга. На тестовом SARIF: **7 558 kept-findings → 217 групп** (LLM-вызовов в ~35 раз меньше), крупнейшая группа — 780 findings.
+
+### Обогащение контекстом (Шаг 4)
+
+`enrich` берёт каждый kept-finding и кладёт в таблицу `contexts` фрагмент исходника вокруг места срабатывания. Энричер **заменяемый**: пайплайн (`enrich/runner.py`) знает только контракт `Enricher` из `enrich/base.py` и берёт активную реализацию из `enrich.get_enricher()`. Сменить ±N строк на «метод целиком» или «дерево вызовов» = переписать `get_enricher()`, остальное не трогать.
+
+Дефолт — `RadiusEnricher` (`enrich/radius.py`): окно ±15 строк (флаг `--radius`), язык-агностичен, ~300-450 токенов на finding. Устойчив: путь не разрешён / файл недоступен → `contexts.ok=0` + fallback на snippet; длинные строки (минифицированный JS) обрезаются. `runner.apply()` идемпотентна (`DELETE FROM contexts` + заново). На тестовом SARIF: **7 558 findings обогащено, 0 промахов** за ~1 сек.
 
 ## Правила фильтрации (sarif/clean.py — BLACKLIST)
 
@@ -190,12 +201,17 @@ python main.py clean
 - Нет UI, только CLI.
 - Deep-dive только по явному `dive <finding_id>`.
 
-## Открытые вопросы
+## Бэклог / открытые вопросы
 
-- **TODO в main.py (`#todo: разобраться с rule_map`)**: при LLM-триаже нужно решить, передавать ли rule_map в промпт или достаточно имени правила из findings. Разбираем на Шаге 5.
-- **Язык deep-dive**: по умолчанию `en`. Флаг `--lang ru|en`, сравниваем на Шаге 7.
+Активные TODO из кода продублированы здесь — единый список, чтобы не терять.
+
+- **`rule_map` в промпте триажа** (`main.py`, TODO перед командой `parse`; Шаг 5) — `parse_rules()` тянет маппинг `rule_id → имя` в таблицу `rules`, но `findings.rule_id` уже хранит имя. Решить, нужно ли подмешивать описание правила в LLM-промпт или имени из findings достаточно.
+- **Пересмотр `blacklist.txt`** (`sarif/clean.py`, TODO у `load_blacklist`; Шаг 5) — сверить список с полными 48 правилами боевого SARIF: не утекает ли мусор в `kept=1`, не отфильтровано ли что-то реально уязвимое. Сейчас список собран вручную по топу частот.
+- **Файлы вне зоны разметки** (Шаг 6, будущая команда `validate` / `report`) — SARIF сканировал весь репозиторий `BenchmarkJava-master`, но эталон OWASP Benchmark (`expectedresults-1.2.csv`, 2740 тест-кейсов) покрывает только `BenchmarkTest*.java`. Из 7 558 kept-findings: **7 496 в `BenchmarkTest*.java`** (есть эталон), **62 в вендоренном JS и shell-скриптах** (`jquery.min.js`, `bootstrap.js`, `*.sh` — эталона нет, минифицированные файлы делают ±15 строк бессмысленными). План: (а) добавить в `clean` фильтр по пути — гасить `kept=0` для вендоренных либ / `scripts/` / `tools/` / `scorecard/`; (б) точность триажа мерить только на `BenchmarkTest*.java` через JOIN с `expectedresults-1.2.csv`. `enrich` к этим файлам устойчив (обрезает длинные строки, fallback на snippet) — не критично.
+- **Язык deep-dive**: по умолчанию `en`, флаг `--lang ru|en` — сравниваем на Шаге 7.
 - **Few-shot примеры в промпте**: не в MVP.
-- **Параллелизм / Web UI / human-in-the-loop**: после MVP.
+- **RAG для точности триажа**: ресёрч перед/во время Шага 5 — см. план.
+- **Параллелизм LLM / Web UI / human-in-the-loop**: после MVP.
 
 ## Статус шагов
 
@@ -203,7 +219,7 @@ python main.py clean
 - [x] Шаг 1. `parse` + `init` + БД (таблицы `rules`, `findings`)
 - [x] Шаг 2. `clean` + `rules`
 - [x] Шаг 3. `group` (таблица `groups`, 217 групп из 7 558 kept-findings)
-- [ ] Шаг 4. `enrich` + `show`
+- [~] Шаг 4. `enrich` ✓ (пакет `enrich/`, таблица `contexts`, ±15 строк) — `show` (debug-команда) ещё не реализован
 - [ ] Шаг 5. `triage` (Ollama + промпт)
 - [ ] Шаг 6. `report` + `status`
 - [ ] Шаг 7. `dive`

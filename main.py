@@ -19,6 +19,7 @@ from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, T
 
 import db
 from sarif import iter_findings, parse_rules, clean_findings, group_findings, BLACKLIST
+from enrich.runner import apply as enrich_findings
 
 app = typer.Typer(
     help="LLM-триаж SARIF-отчётов от PT AI",
@@ -50,7 +51,10 @@ def init(
     conn.close()
     typer.secho(f"БД создана: {db_path}", fg=typer.colors.GREEN)
 
-#todo: разобраться с rule_map
+# TODO(Шаг 5 — промпт триажа): решить судьбу rule_map. parse_rules() тянет
+# маппинг rule_id → человекочитаемое имя в таблицу rules, но findings.rule_id
+# уже хранит само имя. Вопрос: нужно ли подмешивать в LLM-промпт описание
+# правила из rules, или имени из findings достаточно. Решаем на Шаге 5.
 @app.command()
 def parse(
     sarif: Path = typer.Option(..., "--sarif", help="Путь к SARIF-файлу."),
@@ -189,11 +193,41 @@ def group(
 
 @app.command()
 def enrich(
-    db: Path = typer.Option(Path("output/triage.db"), "--db"),
-    radius: int = typer.Option(15, "--radius", help="Сколько строк ±вокруг."),
+    db_path: Path = typer.Option(Path("output/triage.db"), "--db"),
+    radius: int = typer.Option(
+        15, "--radius", help="Сколько строк ±вокруг места срабатывания."
+    ),
 ) -> None:
-    """Подтянуть ±N строк контекста из исходников для репрезентативных findings."""
-    _todo("Шаг 4", "enrich")
+    """Обогатить kept-findings контекстом исходного кода (±N строк)."""
+    conn = db.connect(db_path)
+    db.init_schema(conn)  # создаст таблицу contexts
+
+    total = conn.execute("SELECT COUNT(*) FROM findings WHERE kept=1").fetchone()[0]
+
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+    ) as progress:
+        task = progress.add_task("Обогащение контекстом...", total=total)
+        stats = enrich_findings(
+            conn,
+            radius=radius,
+            on_advance=lambda: progress.update(task, advance=1),
+        )
+
+    conn.close()
+
+    typer.secho("\nГотово:", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Findings обогащено : {stats['findings']:,}")
+    typer.echo(f"  Контекст извлечён  : {stats['ok']:,}")
+    if stats["failed"]:
+        typer.secho(
+            f"  Файл недоступен    : {stats['failed']:,} (fallback на snippet)",
+            fg=typer.colors.YELLOW,
+        )
+    typer.echo(f"  Радиус             : ±{radius} строк")
 
 
 @app.command()

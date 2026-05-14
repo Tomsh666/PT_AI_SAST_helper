@@ -4,6 +4,7 @@
   rules    — маппинг rule_id (UUID или строка) → человекочитаемое имя
   findings — все срабатывания из SARIF (rule_id уже хранится как name)
   groups   — группы findings по (rule_id, snippet) — Шаг 3
+  contexts — фрагмент исходника (±N строк) вокруг срабатывания — Шаг 4
 """
 
 from __future__ import annotations
@@ -41,6 +42,16 @@ CREATE TABLE IF NOT EXISTS groups (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Фрагмент исходника (±N строк) вокруг места срабатывания — Шаг 4.
+-- ok=0 — файл недоступен/путь не разрешён, text содержит fallback (snippet).
+CREATE TABLE IF NOT EXISTS contexts (
+    finding_id  TEXT PRIMARY KEY,
+    text        TEXT NOT NULL,
+    ok          INTEGER NOT NULL DEFAULT 1,
+    note        TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_rule_id ON findings(rule_id);
 CREATE INDEX IF NOT EXISTS idx_findings_kept    ON findings(kept);
 CREATE INDEX IF NOT EXISTS idx_groups_rule_id   ON groups(rule_id);
@@ -55,6 +66,11 @@ _INSERT_FINDING = """
 
 _INSERT_RULE = """
     INSERT OR IGNORE INTO rules (rule_id, name) VALUES (:rule_id, :name)
+"""
+
+_INSERT_CONTEXT = """
+    INSERT OR REPLACE INTO contexts (finding_id, text, ok, note)
+    VALUES (?, ?, ?, ?)
 """
 
 _BATCH_SIZE = 1000
@@ -109,3 +125,19 @@ def insert_findings_batch(conn: sqlite3.Connection, rows: list[dict]) -> int:
         inserted += cur.rowcount
     conn.commit()
     return inserted
+
+
+def insert_contexts_batch(conn: sqlite3.Connection, rows: list[tuple]) -> int:
+    """Вставить контексты батчами по 1000.
+
+    Каждая строка — кортеж (finding_id, text, ok, note). INSERT OR REPLACE —
+    повторный enrich перезаписывает прежний контекст (идемпотентность).
+    Возвращает количество записанных строк.
+    """
+    written = 0
+    for i in range(0, len(rows), _BATCH_SIZE):
+        batch = rows[i : i + _BATCH_SIZE]
+        conn.executemany(_INSERT_CONTEXT, batch)
+        written += len(batch)
+    conn.commit()
+    return written

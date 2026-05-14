@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+from typing import Any, Generator
 
 _WS = re.compile(r"\s+")
 
@@ -32,7 +33,7 @@ def compute_group_id(rule_id: str, normalized: str) -> str:
     return hashlib.sha1(raw.encode()).hexdigest()[:10]
 
 
-def apply(conn: sqlite3.Connection) -> dict[str, int]:
+def apply(conn: sqlite3.Connection) -> dict[str, int | Generator[dict[str, Any], Any, None] | dict[str, Any] | Any]:
     """Пересчитать группы для всех findings с kept=1.
 
     Идемпотентно (как clean.apply): сбрасываем group_id и таблицу groups,
