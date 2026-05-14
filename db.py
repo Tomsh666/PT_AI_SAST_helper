@@ -3,6 +3,7 @@
 Таблицы:
   rules    — маппинг rule_id (UUID или строка) → человекочитаемое имя
   findings — все срабатывания из SARIF (rule_id уже хранится как name)
+  groups   — группы findings по (rule_id, snippet) — Шаг 3
 """
 
 from __future__ import annotations
@@ -26,11 +27,23 @@ CREATE TABLE IF NOT EXISTS findings (
     line        INTEGER NOT NULL,
     snippet     TEXT NOT NULL,
     kept        INTEGER NOT NULL DEFAULT 1,
+    group_id    TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Группы findings по (rule_id, snippet) — LLM зовётся один раз на группу (Шаг 3)
+CREATE TABLE IF NOT EXISTS groups (
+    group_id    TEXT PRIMARY KEY,
+    rule_id     TEXT NOT NULL,
+    snippet     TEXT NOT NULL,
+    count       INTEGER NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'new',
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_findings_rule_id ON findings(rule_id);
 CREATE INDEX IF NOT EXISTS idx_findings_kept    ON findings(kept);
+CREATE INDEX IF NOT EXISTS idx_groups_rule_id   ON groups(rule_id);
 """
 
 _INSERT_FINDING = """
@@ -56,9 +69,23 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Идемпотентные миграции для БД, созданных на предыдущих шагах.
+
+    findings.group_id добавлен на Шаге 3 — для БД, распарсенной раньше,
+    дотягиваем колонку через ALTER (перепарсивать 70 МБ SARIF не нужно).
+    """
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(findings)")}
+    if "group_id" not in cols:
+        conn.execute("ALTER TABLE findings ADD COLUMN group_id TEXT")
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     """Создать таблицы и индексы (если ещё нет)."""
     conn.executescript(_SCHEMA)
+    _migrate(conn)
+    # Индекс по group_id — после миграции: на старой БД до ALTER колонки ещё нет
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_group_id ON findings(group_id)")
     conn.commit()
 
 

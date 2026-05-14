@@ -13,7 +13,7 @@ from pathlib import Path
 
 _BLACKLIST_FILE = Path(__file__).parent / "blacklist.txt"
 
-
+#todo: обновить Blacklist. Сверить со всеми уязвимостями
 def load_blacklist(path: Path = _BLACKLIST_FILE) -> frozenset[str]:
     """Загрузить список правил из .txt файла."""
     rules: list[str] = []

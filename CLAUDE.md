@@ -58,10 +58,11 @@ python main.py dive <finding_id>      # точечный разбор
 ```
 PT_AI_SAST_helper/
 ├── sarif/
-│   ├── __init__.py   — экспортирует iter_findings, parse_rules, clean_findings
+│   ├── __init__.py   — экспортирует iter_findings, parse_rules, clean_findings, group_findings
 │   ├── parse.py      — потоковое чтение SARIF (ijson), маппинг путей, finding_id
 │   ├── clean.py      — загружает blacklist.txt, функция apply()
-│   └── blacklist.txt — список правил для фильтрации (одно на строку, # — комментарий)
+│   ├── blacklist.txt — список правил для фильтрации (одно на строку, # — комментарий)
+│   └── group.py      — нормализация snippet, group_id, группировка kept-findings
 ├── db.py             — SQLite: connect, init_schema, insert_rules, insert_findings_batch
 ├── main.py           — CLI (Typer): все команды
 ├── inputs/           — SARIF-файлы и исходники (в .gitignore)
@@ -83,12 +84,13 @@ PT_AI_SAST_helper/
 |---|---|
 | `rules` | Маппинг rule_id → человекочитаемое имя (из SARIF) |
 | `findings` | Все срабатывания; `kept=0` — исключены из обработки |
-| `groups` | Группы по (rule_id, normalized_snippet) — Шаг 3 |
+| `groups` | Группы по (rule_id, snippet); `status` new/triaged — Шаг 3 |
 | `contexts` | ±15 строк контекста из исходников — Шаг 4 |
 | `verdicts` | LLM-вердикты по группам — Шаг 5 |
 | `dives` | Развёрнутые разборы по finding'ам — Шаг 7 |
 
-> Таблицы `groups`, `contexts`, `verdicts`, `dives` — добавляются по мере реализации шагов.
+> Таблицы `contexts`, `verdicts`, `dives` — добавляются по мере реализации шагов.
+> `findings.group_id` дотягивается в существующую БД через `db._migrate()` (ALTER, без перепарсинга SARIF).
 
 ### Path mapping
 
@@ -102,7 +104,9 @@ PT_AI_SAST_helper/
 
 `group_id = sha1(f"{rule_id}|{normalize_snippet(snippet)}")[:10]`. LLM зовётся один раз на группу. Вердикт группы распространяется на все findings виртуально через JOIN.
 
-`normalize_snippet`: trim + collapse whitespace + удалить string/числовые литералы + удалить однострочные комментарии.
+`normalize_snippet`: trim + схлопывание пробелов (`\s+` → один пробел). Литералы и комментарии **не трогаем** — в боевом SARIF snippet'ы и так почти точные дубли (88%), агрессивная нормализация дала бы риск слить разные паттерны при мизерном выигрыше. В SARIF от PT AI нет `codeFlows`/`relatedLocations` — кроме snippet'а группировать не по чему.
+
+`group.apply()` идемпотентна: сбрасывает `group_id`/`groups` и строит заново — можно перезапускать после правки blacklist без перепарсинга. На тестовом SARIF: **7 558 kept-findings → 217 групп** (LLM-вызовов в ~35 раз меньше), крупнейшая группа — 780 findings.
 
 ## Правила фильтрации (sarif/clean.py — BLACKLIST)
 
@@ -198,7 +202,7 @@ python main.py clean
 - [x] Шаг 0. Каркас + CLAUDE.md + .gitignore
 - [x] Шаг 1. `parse` + `init` + БД (таблицы `rules`, `findings`)
 - [x] Шаг 2. `clean` + `rules`
-- [ ] Шаг 3. `group`
+- [x] Шаг 3. `group` (таблица `groups`, 217 групп из 7 558 kept-findings)
 - [ ] Шаг 4. `enrich` + `show`
 - [ ] Шаг 5. `triage` (Ollama + промпт)
 - [ ] Шаг 6. `report` + `status`

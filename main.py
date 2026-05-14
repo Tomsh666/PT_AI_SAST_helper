@@ -18,7 +18,7 @@ import typer
 from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
 
 import db
-from sarif import iter_findings, parse_rules, clean_findings, BLACKLIST
+from sarif import iter_findings, parse_rules, clean_findings, group_findings, BLACKLIST
 
 app = typer.Typer(
     help="LLM-триаж SARIF-отчётов от PT AI",
@@ -169,10 +169,22 @@ def clean(
 
 @app.command()
 def group(
-    db: Path = typer.Option(Path("output/triage.db"), "--db"),
+    db_path: Path = typer.Option(Path("output/triage.db"), "--db"),
 ) -> None:
-    """Нормализовать snippet'ы и сгруппировать по (rule_id, normalized_snippet)."""
-    _todo("Шаг 3", "group")
+    """Сгруппировать kept-findings по (rule_id, snippet)."""
+    conn = db.connect(db_path)
+    db.init_schema(conn)  # создаст таблицу groups и колонку group_id
+
+    stats = group_findings(conn)
+    conn.close()
+
+    typer.secho("\nГотово:", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Findings сгруппировано : {stats['findings']:,}")
+    typer.echo(f"  Групп создано          : {stats['groups']:,}")
+    if stats["groups"]:
+        avg = stats["findings"] / stats["groups"]
+        typer.echo(f"  Средний размер группы  : {avg:.1f}")
+        typer.echo(f"  Крупнейшая группа      : {stats['biggest']:,}")
 
 
 @app.command()

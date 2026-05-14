@@ -8,5 +8,12 @@
 
 from sarif.parse import iter_findings, parse_rules
 from sarif.clean import apply as clean_findings, BLACKLIST
+from sarif.group import apply as group_findings
 
-__all__ = ["iter_findings", "parse_rules", "clean_findings", "BLACKLIST"]
+__all__ = [
+    "iter_findings",
+    "parse_rules",
+    "clean_findings",
+    "BLACKLIST",
+    "group_findings",
+]
