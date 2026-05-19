@@ -1,9 +1,3 @@
-"""PT AI SAST Helper — локальный LLM-триаж SARIF-отчётов от PT AI 5.4.
-
-Точка входа CLI. Команды реализуются пошагово согласно плану в
-C:\\Users\\anton\\.claude\\plans\\concurrent-brewing-castle.md
-"""
-
 from __future__ import annotations
 
 import sys
@@ -18,24 +12,13 @@ import typer
 from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
 
 import db
-from sarif import iter_findings, parse_rules, clean_findings, group_findings, BLACKLIST
-from enrich.runner import apply as enrich_findings
+from sarif import iter_findings, parse_rules, clean_findings
 
 app = typer.Typer(
     help="LLM-триаж SARIF-отчётов от PT AI",
     no_args_is_help=True,
     add_completion=False,
 )
-
-
-def _todo(step: str, command: str) -> None:
-    """Заглушка для нереализованных команд."""
-    typer.secho(
-        f"[{step}] '{command}' ещё не реализована.",
-        fg=typer.colors.YELLOW,
-    )
-    raise typer.Exit(code=1)
-
 
 @app.command()
 def init(
@@ -51,10 +34,6 @@ def init(
     conn.close()
     typer.secho(f"БД создана: {db_path}", fg=typer.colors.GREEN)
 
-# TODO(Шаг 5 — промпт триажа): решить судьбу rule_map. parse_rules() тянет
-# маппинг rule_id → человекочитаемое имя в таблицу rules, но findings.rule_id
-# уже хранит само имя. Вопрос: нужно ли подмешивать в LLM-промпт описание
-# правила из rules, или имени из findings достаточно. Решаем на Шаге 5.
 @app.command()
 def parse(
     sarif: Path = typer.Option(..., "--sarif", help="Путь к SARIF-файлу."),
@@ -169,118 +148,6 @@ def clean(
     kept = conn.execute("SELECT COUNT(*) FROM findings WHERE kept=1").fetchone()[0]
     typer.secho(f"\nОсталось для обработки (kept=1): {kept:,}", fg=typer.colors.GREEN)
     conn.close()
-
-
-@app.command()
-def group(
-    db_path: Path = typer.Option(Path("output/triage.db"), "--db"),
-) -> None:
-    """Сгруппировать kept-findings по (rule_id, snippet)."""
-    conn = db.connect(db_path)
-    db.init_schema(conn)  # создаст таблицу groups и колонку group_id
-
-    stats = group_findings(conn)
-    conn.close()
-
-    typer.secho("\nГотово:", fg=typer.colors.GREEN, bold=True)
-    typer.echo(f"  Findings сгруппировано : {stats['findings']:,}")
-    typer.echo(f"  Групп создано          : {stats['groups']:,}")
-    if stats["groups"]:
-        avg = stats["findings"] / stats["groups"]
-        typer.echo(f"  Средний размер группы  : {avg:.1f}")
-        typer.echo(f"  Крупнейшая группа      : {stats['biggest']:,}")
-
-
-@app.command()
-def enrich(
-    db_path: Path = typer.Option(Path("output/triage.db"), "--db"),
-    radius: int = typer.Option(
-        15, "--radius", help="Сколько строк ±вокруг места срабатывания."
-    ),
-) -> None:
-    """Обогатить kept-findings контекстом исходного кода (±N строк)."""
-    conn = db.connect(db_path)
-    db.init_schema(conn)  # создаст таблицу contexts
-
-    total = conn.execute("SELECT COUNT(*) FROM findings WHERE kept=1").fetchone()[0]
-
-    with Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        TimeElapsedColumn(),
-    ) as progress:
-        task = progress.add_task("Обогащение контекстом...", total=total)
-        stats = enrich_findings(
-            conn,
-            radius=radius,
-            on_advance=lambda: progress.update(task, advance=1),
-        )
-
-    conn.close()
-
-    typer.secho("\nГотово:", fg=typer.colors.GREEN, bold=True)
-    typer.echo(f"  Findings обогащено : {stats['findings']:,}")
-    typer.echo(f"  Контекст извлечён  : {stats['ok']:,}")
-    if stats["failed"]:
-        typer.secho(
-            f"  Файл недоступен    : {stats['failed']:,} (fallback на snippet)",
-            fg=typer.colors.YELLOW,
-        )
-    typer.echo(f"  Радиус             : ±{radius} строк")
-
-
-@app.command()
-def triage(
-    db: Path = typer.Option(Path("output/triage.db"), "--db"),
-    model: str = typer.Option("qwen2.5-coder:7b-instruct-q4", "--model"),
-    limit: int | None = typer.Option(None, "--limit"),
-    rule: str | None = typer.Option(None, "--rule"),
-    resume: bool = typer.Option(True, "--resume/--no-resume"),
-) -> None:
-    """Пройти по группам и получить вердикты REAL/FP от LLM."""
-    _todo("Шаг 5", "triage")
-
-
-@app.command()
-def dive(
-    finding_id: str = typer.Argument(..., help="ID finding'а из БД."),
-    db: Path = typer.Option(Path("output/triage.db"), "--db"),
-    model: str = typer.Option("qwen2.5-coder:7b-instruct-q4", "--model"),
-    lang: str = typer.Option("en", "--lang", help="Язык объяснения: en|ru."),
-    out: Path = typer.Option(Path("output/reports"), "--out"),
-) -> None:
-    """Развёрнутый разбор одного finding'а (Markdown + CWE/OWASP + фикс)."""
-    _todo("Шаг 7", "dive")
-
-
-@app.command()
-def report(
-    db: Path = typer.Option(Path("output/triage.db"), "--db"),
-    fmt: str = typer.Option("md", "--format", help="md|csv."),
-    only: str | None = typer.Option(None, "--only", help="REAL|FP|UNSURE."),
-    rule: str | None = typer.Option(None, "--rule"),
-    out: Path = typer.Option(Path("output/reports/summary.md"), "--out"),
-) -> None:
-    """Сводный отчёт по findings с вердиктами."""
-    _todo("Шаг 6", "report")
-
-
-@app.command()
-def status(
-    db: Path = typer.Option(Path("output/triage.db"), "--db"),
-) -> None:
-    """Состояние БД и Ollama: счётчики, здоровье сервиса."""
-    _todo("Шаг 6", "status")
-
-
-@app.command()
-def show(
-    finding_id: str = typer.Argument(..., help="ID finding'а из БД."),
-    db: Path = typer.Option(Path("output/triage.db"), "--db"),
-) -> None:
-    """Debug-вывод одного finding'а: метаданные + snippet + контекст."""
-    _todo("Шаг 4", "show")
 
 
 if __name__ == "__main__":
