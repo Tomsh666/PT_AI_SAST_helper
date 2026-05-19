@@ -2,8 +2,7 @@
 
 Содержит:
   parse.py  — потоковое чтение и извлечение полей
-  clean.py  — фильтрация мусорных правил (Шаг 2)
-  group.py  — нормализация snippet и группировка (Шаг 3)
+  clean.py  — фильтрация мусорных правил по blacklist
 """
 
 from sarif.parse import iter_findings, parse_rules

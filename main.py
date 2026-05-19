@@ -47,9 +47,19 @@ def parse(
     ),
     db_path: Path = typer.Option(Path("output/triage.db"), "--db"),
 ) -> None:
-    """Прочитать SARIF и залить findings в БД (kept=1)."""
+    """Прочитать SARIF и залить findings в БД (kept=1).
+
+    Требует, чтобы БД была создана командой `init` заранее.
+    """
+    if not db_path.exists():
+        typer.secho(
+            f"БД не найдена: {db_path}\nСначала выполни: python main.py init --db {db_path}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     conn = db.connect(db_path)
-    db.init_schema(conn)  # на случай если init не запускали
 
     # --- Шаг 1: правила ---
     typer.echo("Читаем правила из SARIF...")
@@ -110,6 +120,11 @@ def rules(
     table.add_column("Правило")
 
     total = conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0]
+    if total == 0:
+        typer.secho("БД пустая — findings нет. Запусти parse.", fg=typer.colors.YELLOW)
+        conn.close()
+        return
+
     for row in conn.execute("""
         SELECT rule_id,
                COUNT(*) as cnt,

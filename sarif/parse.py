@@ -33,13 +33,14 @@ def parse_rules(sarif_path: Path) -> dict[str, str]:
 
 
 def _finding_id(rule_id: str, file_uri: str, line: int, snippet: str) -> str:
-    """Стабильный ID = sha1(rule|file|line|snippet)[:8].
+    """Стабильный ID = sha1(rule|file|line|snippet)[:16].
 
-    Один и тот же finding между прогонами получает один и тот же ID.
-    Точные дубликаты (rule+file+line+snippet совпадают) → одинаковый ID.
+    16 hex = 64 бита: коллизии на нашем масштабе (десятки-сотни тысяч
+    findings) практически невозможны. 8 hex давало бы ~50% шанс
+    коллизии уже на ~65k записей.
     """
     raw = f"{rule_id}|{file_uri}|{line}|{snippet}"
-    return hashlib.sha1(raw.encode()).hexdigest()[:8]
+    return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
 def _resolve_path(
@@ -57,21 +58,35 @@ def _resolve_path(
 
     Если файл не найден — возвращает None (finding всё равно сохранится).
     """
-    # Убираем ведущие "./" и "/"
-    uri = file_uri.lstrip("./")
+    # Нормализуем разделители и убираем ведущие "./" и "/"
+    # ВАЖНО: lstrip("./") удалял ЛЮБЫЕ '.' и '/' из начала (а не префикс).
+    uri = file_uri.replace("\\", "/")
+    if uri.startswith("./"):
+        uri = uri[2:]
+    uri = uri.lstrip("/")
 
     if prefix_strip:
         # Явный override: отрезаем указанный префикс
         prefix = prefix_strip.strip("/")
         if uri.startswith(prefix + "/"):
             uri = uri[len(prefix) + 1 :]
-    else:
-        # Эвристика: отрезаем первый сегмент (имя архива)
-        parts = uri.split("/", 1)
-        uri = parts[1] if len(parts) == 2 else parts[0]
+        # Пробуем как есть
+        resolved = project_root / uri
+        return resolved if resolved.exists() else None
 
+    # Сначала пробуем uri как есть (на случай, если архивного префикса нет)
     resolved = project_root / uri
-    return resolved if resolved.exists() else None
+    if resolved.exists():
+        return resolved
+
+    # Не нашлось — эвристика: отрезаем первый сегмент (имя архива)
+    parts = uri.split("/", 1)
+    if len(parts) == 2:
+        resolved = project_root / parts[1]
+        if resolved.exists():
+            return resolved
+
+    return None
 
 
 def _parse_result(
