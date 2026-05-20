@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -v \"/c/Users/anton/.claude/plans/abundant-honking-elephant.md\")"
+    ]
+  }
+}
