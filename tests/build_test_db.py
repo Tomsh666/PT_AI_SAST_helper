@@ -5,7 +5,6 @@ import sqlite3
 from pathlib import Path
 
 from rich.console import Console
-from rich.table import Table
 
 BENCHMARK_RE = re.compile(r"BenchmarkTest(\d{5})")
 
@@ -14,13 +13,16 @@ DROP TABLE IF EXISTS findings;
 DROP INDEX IF EXISTS idx_test_file_name;
 DROP INDEX IF EXISTS idx_test_category;
 CREATE TABLE findings (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_name TEXT NOT NULL,
-    file_path TEXT NOT NULL,
-    rule_id   TEXT NOT NULL,
-    category  TEXT NOT NULL,
-    real      INTEGER NOT NULL,
-    kept      INTEGER NOT NULL
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    finding_id TEXT NOT NULL,
+    file_name  TEXT NOT NULL,
+    file_path  TEXT NOT NULL,
+    line       INTEGER NOT NULL,
+    snippet    TEXT,
+    rule_id    TEXT NOT NULL,
+    category   TEXT NOT NULL,
+    real       INTEGER NOT NULL,
+    kept       INTEGER NOT NULL
 );
 CREATE INDEX idx_test_file_name ON findings(file_name);
 CREATE INDEX idx_test_category  ON findings(category);
@@ -46,7 +48,6 @@ def main() -> None:
     parser.add_argument("--triage-db",   default=str(base / "output" / "triage.db"))
     parser.add_argument("--csv",         default=str(base / "inputs" / "projects" / "BenchmarkJava" / "expectedresults-1.2.csv"))
     parser.add_argument("--test-db",     default=str(base / "tests" / "data" / "test.db"))
-    parser.add_argument("--missed-file", default=str(base / "tests" / "data" / "missed_tests.csv"))
     args = parser.parse_args()
 
     ground_truth = load_csv(Path(args.csv))
@@ -91,31 +92,10 @@ def main() -> None:
 
     count = sqlite3.connect(test_db).execute("SELECT COUNT(*) FROM findings").fetchone()[0]
 
-    missed = sorted(ground_truth.keys() - matched_tests)
-    missed_file = Path(args.missed_file)
-    missed_file.parent.mkdir(parents=True, exist_ok=True)
-    with missed_file.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["test_name", "category", "real"])
-        for t in missed:
-            cat, real_int = ground_truth[t]
-            writer.writerow([t, cat, real_int])
-
     console = Console()
     console.print(f"[green]Вставлено:[/green]      {count}")
     console.print(f"[yellow]Пропущено:[/yellow]     {skipped} (helpers/JS/configs)")
     console.print(f"[cyan]Покрыто тестов:[/cyan] {len(matched_tests)} / {len(ground_truth)}")
-    console.print(f"[red]Не покрыто:[/red]     {len(missed)} -> {missed_file}")
-
-    if missed:
-        table = Table(title=f"Первые {min(50, len(missed))} непокрытых тестов")
-        table.add_column("test_name")
-        table.add_column("category")
-        table.add_column("real")
-        for t in missed[:50]:
-            cat, real_int = ground_truth[t]
-            table.add_row(t, cat, str(real_int))
-        console.print(table)
 
 
 if __name__ == "__main__":

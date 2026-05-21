@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from enum import Enum
 from pathlib import Path
 
 # Windows: переключаем консоль на UTF-8 (иначе Rich ломается на cp1251)
@@ -12,7 +13,13 @@ import typer
 from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
 
 import db
-from sarif import iter_findings, parse_rules, clean_findings
+from sarif import iter_findings, parse_rules, clean_findings, context as ctx_mod
+
+
+class ContextMod(str, Enum):
+    radius = "radius"
+    dataflow = "dataflow"  # stub
+
 
 app = typer.Typer(
     help="LLM-триаж SARIF-отчётов от PT AI",
@@ -163,6 +170,73 @@ def clean(
     kept = conn.execute("SELECT COUNT(*) FROM findings WHERE kept=1").fetchone()[0]
     typer.secho(f"\nОсталось для обработки (kept=1): {kept:,}", fg=typer.colors.GREEN)
     conn.close()
+
+
+@app.command()
+def context(
+    db_path: Path = typer.Option(Path("output/triage.db"), "--db"),
+    context_mod: ContextMod = typer.Option(ContextMod.radius, "--context-mod"),
+) -> None:
+    """Рендерить код-контекст для всех findings и сохранить в finding_context."""
+    if not db_path.exists():
+        typer.secho(
+            f"БД не найдена: {db_path}\nСначала выполни: python main.py init --db {db_path}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+
+    conn = db.connect(db_path)
+    rows = conn.execute(
+        "SELECT finding_id, file_path, line, rule_id FROM findings"
+    ).fetchall()
+
+    total = len(rows)
+    if total == 0:
+        typer.secho("Findings не найдены. Запусти parse.", fg=typer.colors.YELLOW)
+        conn.close()
+        return
+
+    batch: list[dict] = []
+    upserted = 0
+    unavailable = 0
+
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+    ) as progress:
+        task = progress.add_task("Рендер контекста...", total=total)
+
+        for row in rows:
+            file_path = row["file_path"]
+
+            if context_mod == ContextMod.radius:
+                rendered = ctx_mod.render(file_path or "", row["line"], row["rule_id"])
+                label = Path(file_path).name if file_path else "?"
+                progress.update(task, description=f"[dim]{label}:{row['line']}[/dim]")
+            else:
+                rendered = f"(метод {context_mod.value} ещё не реализован)"
+
+            if rendered == ctx_mod.UNAVAILABLE:
+                unavailable += 1
+
+            batch.append({"finding_id": row["finding_id"], "context": rendered})
+            progress.advance(task)
+
+            if len(batch) >= 1000:
+                upserted += db.upsert_contexts_batch(conn, batch)
+                batch.clear()
+
+        if batch:
+            upserted += db.upsert_contexts_batch(conn, batch)
+
+    conn.close()
+    typer.secho(f"\nГотово:", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Всего findings     : {total:,}")
+    typer.echo(f"  Записано контекстов: {upserted:,}")
+    if unavailable:
+        typer.secho(f"  Файл недоступен    : {unavailable:,}", fg=typer.colors.YELLOW)
 
 
 if __name__ == "__main__":

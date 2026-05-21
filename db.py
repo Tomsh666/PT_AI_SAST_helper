@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS findings (
 
 CREATE INDEX IF NOT EXISTS idx_findings_rule_id  ON findings(rule_id);
 CREATE INDEX IF NOT EXISTS idx_findings_kept     ON findings(kept);
+
+CREATE TABLE IF NOT EXISTS finding_context (
+    finding_id TEXT PRIMARY KEY,
+    context    TEXT NOT NULL
+);
 """
 
 _INSERT_FINDING = """
@@ -76,5 +81,18 @@ def insert_findings_batch(conn: sqlite3.Connection, rows: list[dict]) -> int:
         inserted += cur.rowcount
     conn.commit()
     return inserted
+
+
+def upsert_contexts_batch(conn: sqlite3.Connection, rows: list[dict]) -> int:
+    """INSERT OR REPLACE finding_context батчами. rows: [{finding_id, context}].
+    Возвращает количество затронутых строк."""
+    sql = "INSERT OR REPLACE INTO finding_context (finding_id, context) VALUES (:finding_id, :context)"
+    affected = 0
+    for i in range(0, len(rows), _BATCH_SIZE):
+        batch = rows[i : i + _BATCH_SIZE]
+        cur = conn.executemany(sql, batch)
+        affected += cur.rowcount
+    conn.commit()
+    return affected
 
 
